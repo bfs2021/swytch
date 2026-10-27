@@ -32,6 +32,9 @@ type Writer struct {
 	protocol   ProtocolVersion
 	stats      *Stats
 	wroteError bool
+	errorCount uint64
+	errorStart int
+	errorEnd   int
 	tmp        [64]byte
 	scratch    bytes.Buffer // reusable response-staging buffer, see Scratch
 }
@@ -54,6 +57,39 @@ func (w *Writer) ResetErrorFlag() {
 // WroteError returns true if WriteError was called since last ResetErrorFlag
 func (w *Writer) WroteError() bool {
 	return w.wroteError
+}
+
+// ErrorCount identifies explicit error writes, independently of the per-command
+// stats flag (which nested dispatch can reset).
+func (w *Writer) ErrorCount() uint64 { return w.errorCount }
+
+func (w *Writer) recordError(start int) {
+	w.wroteError = true
+	w.errorCount++
+	w.errorStart = start
+	w.errorEnd = w.buf.Len()
+}
+
+// DiscardPartialReply replaces this command's partial output with its last
+// explicit error, preserving replies already buffered by an enclosing EXEC.
+func (w *Writer) DiscardPartialReply(start int, previousErrors uint64) bool {
+	if w.errorCount == previousErrors {
+		return false
+	}
+
+	reply := bytes.Clone(w.buf.Bytes()[w.errorStart:w.errorEnd])
+	w.buf.Truncate(start)
+	w.buf.Write(reply)
+	w.errorStart = start
+	w.errorEnd = w.buf.Len()
+
+	return true
+}
+
+func (w *Writer) writeErrorReply(reply []byte) {
+	start := w.buf.Len()
+	w.buf.Write(reply)
+	w.recordError(start)
 }
 
 // SetProtocol sets the protocol version for subsequent writes
@@ -106,10 +142,11 @@ func (w *Writer) WriteSimpleString(s string) {
 
 // WriteError writes a RESP error (-ERR message\r\n)
 func (w *Writer) WriteError(msg string) {
+	start := w.buf.Len()
 	w.buf.WriteByte(RESPError)
 	w.buf.WriteString(msg)
 	w.buf.Write(crlf)
-	w.wroteError = true
+	w.recordError(start)
 
 	// Track error statistics
 	if w.stats != nil {
@@ -125,12 +162,13 @@ func (w *Writer) WriteError(msg string) {
 
 // WriteErrorf writes a formatted RESP error
 func (w *Writer) WriteErrorf(format string, args ...any) {
+	start := w.buf.Len()
 	w.buf.WriteByte(RESPError)
 	w.buf.WriteString("ERR ")
 	// Simple formatting without fmt to avoid allocation
 	w.buf.WriteString(format)
 	w.buf.Write(crlf)
-	w.wroteError = true
+	w.recordError(start)
 
 	// Track error statistics
 	if w.stats != nil {
@@ -287,12 +325,14 @@ func (w *Writer) WriteSet(count int) {
 func (w *Writer) WriteBlobError(errType, msg string) {
 	if w.protocol == RESP3 {
 		fullMsg := errType + " " + msg
+		start := w.buf.Len()
 
 		w.buf.WriteByte(RESP3BlobError)
 		w.buf.Write(strconv.AppendInt(w.tmp[:0], int64(len(fullMsg)), 10))
 		w.buf.Write(crlf)
 		w.buf.WriteString(fullMsg)
 		w.buf.Write(crlf)
+		w.recordError(start)
 	} else {
 		w.WriteError(errType + " " + msg)
 	}
@@ -395,34 +435,39 @@ func (w *Writer) WriteOne() {
 
 // WriteWrongType writes the WRONGTYPE error
 func (w *Writer) WriteWrongType() {
-	w.buf.Write(respWrongType)
+	w.writeErrorReply(respWrongType)
 }
 
 // WriteNoAuth writes the NOAUTH error
 func (w *Writer) WriteNoAuth() {
-	w.buf.Write(respNoAuth)
+	w.writeErrorReply(respNoAuth)
 }
 
 // WriteWrongNumArguments writes the wrong number of arguments error
 func (w *Writer) WriteWrongNumArguments(cmd string) {
+	start := w.buf.Len()
 	w.buf.WriteByte(RESPError)
 	w.buf.WriteString("ERR wrong number of arguments for '")
 	w.buf.WriteString(cmd)
 	w.buf.WriteString("' command")
 	w.buf.Write(crlf)
+	w.recordError(start)
 }
 
 // WriteWrongNumArgs writes the wrong number of arguments error
 func (w *Writer) WriteWrongNumArgs(cmd string) {
+	start := w.buf.Len()
 	w.buf.WriteByte(RESPError)
 	w.buf.WriteString("ERR wrong number of args for '")
 	w.buf.WriteString(cmd)
 	w.buf.WriteString("' command")
 	w.buf.Write(crlf)
+	w.recordError(start)
 }
 
 // WriteUnknownCommand writes the unknown command error
 func (w *Writer) WriteUnknownCommand(cmd string, args [][]byte) {
+	start := w.buf.Len()
 	w.buf.WriteByte(RESPError)
 	w.buf.WriteString("ERR unknown command '")
 	w.buf.WriteString(cmd)
@@ -445,21 +490,22 @@ func (w *Writer) WriteUnknownCommand(cmd string, args [][]byte) {
 	}
 
 	w.buf.Write(crlf)
+	w.recordError(start)
 }
 
 // WriteSyntaxError writes a syntax error
 func (w *Writer) WriteSyntaxError() {
-	w.buf.Write(respSyntaxError)
+	w.writeErrorReply(respSyntaxError)
 }
 
 // WriteNotInteger writes the "not an integer" error
 func (w *Writer) WriteNotInteger() {
-	w.buf.Write(respNotInteger)
+	w.writeErrorReply(respNotInteger)
 }
 
 // WriteOutOfRange writes the "out of range" error
 func (w *Writer) WriteOutOfRange() {
-	w.buf.Write(respOutOfRange)
+	w.writeErrorReply(respOutOfRange)
 }
 
 // Pre-allocated response byte slices for common responses

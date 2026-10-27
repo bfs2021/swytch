@@ -497,7 +497,7 @@ func (h *Handler) ExecuteInto(cmd *shared.Command, w *shared.Writer, conn *share
 
 		for attempt := 0; ; attempt++ {
 			savedLen := w.Buffer().Len()
-			entry.ConnHandler(cmd, w, db, conn)
+			runDataCommand(entry, cmd, w, func() { entry.ConnHandler(cmd, w, db, conn) })
 
 			if cmd.Context != nil && !conn.InTransaction {
 				err := cmd.Context.Flush()
@@ -627,7 +627,7 @@ func (h *Handler) ExecuteInto(cmd *shared.Command, w *shared.Writer, conn *share
 		for attempt := 0; ; attempt++ {
 			savedLen := w.Buffer().Len()
 
-			runner()
+			runDataCommand(entry, cmd, w, runner)
 
 			if cmd.Context != nil && !conn.InTransaction {
 				err := cmd.Context.Flush()
@@ -926,6 +926,9 @@ func (h *Handler) queueCommand(cmd *shared.Command, w *shared.Writer, conn *shar
 
 		return
 	}
+
+	preparedRunner := runner
+	runner = func() { runDataCommand(entry, cmdCopy, w, preparedRunner) }
 
 	if conn.SSITransaction {
 		// TxnPrepare may omit keys (for example EVAL); use the registry's
