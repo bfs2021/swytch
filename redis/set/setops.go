@@ -548,7 +548,12 @@ func handleSDiffStore(cmd *shared.Command, w *shared.Writer, db *shared.Database
 
 // writeStoreResult handles the common *STORE pattern: delete dest, insert result, write count.
 func writeStoreResult(cmd *shared.Command, w *shared.Writer, destKey string, result map[string]struct{}) {
-	_, destTips, _, _, _ := getSetSnapshot(cmd, destKey)
+	_, destTips, _, _, err := getSetSnapshot(cmd, destKey)
+	if err != nil {
+		w.WriteError(err.Error())
+
+		return
+	}
 
 	if err := emitDeleteKey(cmd, destKey, destTips); err != nil {
 		w.WriteError(err.Error())
