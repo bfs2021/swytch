@@ -232,6 +232,7 @@ func TestHashFailureDiscardsPartialReply(t *testing.T) {
 		{"HGETDEL", "h", "FIELDS", "3", "a", "b", "c"},
 		{"HEXPIRE", "h", "0", "FIELDS", "3", "a", "b", "c"},
 		{"HEXPIRE", "h", "600", "FIELDS", "3", "a", "b", "c"},
+		{"HGETEX", "h", "EX", "600", "FIELDS", "3", "a", "b", "c"},
 	} {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			h := newSSIHandler(t)

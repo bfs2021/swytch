@@ -59,6 +59,6 @@ func init() {
 		shared.ModuleEntry{Cmd: shared.CmdHPExpireTime, Entry: &shared.CommandEntry{Handler: handleHPExpireTime}},
 		shared.ModuleEntry{Cmd: shared.CmdHPersist, Entry: &shared.CommandEntry{Handler: handleHPersist, Keys: shared.KeysFirst, Flags: shared.FlagWrite}},
 		shared.ModuleEntry{Cmd: shared.CmdHSetEx, Entry: &shared.CommandEntry{Handler: handleHSetEx, Keys: shared.KeysFirst, Flags: shared.FlagWrite}},
-		shared.ModuleEntry{Cmd: shared.CmdHGetEx, Entry: &shared.CommandEntry{Handler: handleHGetEx}},
+		shared.ModuleEntry{Cmd: shared.CmdHGetEx, Entry: &shared.CommandEntry{Handler: handleHGetEx, Keys: shared.KeysFirst, Flags: shared.FlagWrite}},
 	)
 }
