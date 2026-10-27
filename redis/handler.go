@@ -1354,11 +1354,10 @@ func (h *Handler) HandleForwardedTransaction(tx *pb.ForwardedTransaction) *pb.Fo
 				cmd.Context = conn.EffectsCtx
 			}
 
-			// Use a discard writer for queuing (QUEUED responses are not forwarded)
-			var discardBuf bytes.Buffer
-
-			discardW := shared.NewWriter(&discardBuf)
-			h.queueCommand(cmd, discardW, conn, db)
+			// Runners capture this writer. Discard only the preparation replies,
+			// so execution writes its results into the forwarded response.
+			h.queueCommand(cmd, w, conn, db)
+			respBuf.Reset()
 		}
 
 		// Set up WATCH keys if present
@@ -1387,7 +1386,13 @@ func (h *Handler) HandleForwardedTransaction(tx *pb.ForwardedTransaction) *pb.Fo
 		// Flush effects
 		if conn.EffectsCtx != nil {
 			if err := conn.EffectsCtx.Flush(); err != nil {
-				slog.Debug("forwarded transaction flush failed", "error", err)
+				respBuf.Reset()
+
+				if errors.Is(err, effects.ErrTxnAborted) {
+					w.WriteNullArray()
+				} else {
+					return &pb.ForwardedResponse{Error: true, ErrorMessage: "TRYAGAIN " + err.Error()}
+				}
 			}
 		}
 	}
