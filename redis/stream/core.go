@@ -21,7 +21,6 @@ package stream
 
 import (
 	"encoding/binary"
-	"log/slog"
 	"slices"
 	"sort"
 	"time"
@@ -692,15 +691,19 @@ func getPELSnapshot(cmd *shared.Command, streamKey, group string) (snap *pb.Redu
 }
 
 // groupExists checks if a group exists by looking for the "__group__" element.
-func groupExists(cmd *shared.Command, streamKey, groupName string) bool {
+func groupExists(cmd *shared.Command, streamKey, groupName string) (bool, error) {
 	snap, _, err := cmd.Context.GetSnapshot(groupKey(streamKey, groupName))
-	if err != nil || snap == nil || snap.NetAdds == nil {
-		return false
+	if err != nil {
+		return false, err
+	}
+
+	if snap == nil || snap.NetAdds == nil {
+		return false, nil
 	}
 
 	_, exists := snap.GetNetAdds()["__group__"]
 
-	return exists
+	return exists, nil
 }
 
 // getGroupMeta retrieves a group's metadata from the group key snapshot.
@@ -740,15 +743,19 @@ func getConsumersFromGroup(snap *pb.ReducedEffect) map[string]*pb.ReducedElement
 // listGroups returns a list of group names for a stream by scanning for group keys.
 // Since groups are now stored at individual keys, we need to enumerate them.
 // This function checks known group names from the caller context.
-func listGroupNames(cmd *shared.Command, streamKey string) []string {
+func listGroupNames(cmd *shared.Command, streamKey string) ([]string, error) {
 	// Groups are stored at {stream}\0g\0{group} keys.
 	// We can't enumerate keys from the effects engine easily, so we use
 	// a registry key that tracks group names.
 	registryKey := streamKey + "\x01g\x01__registry__"
 
 	snap, _, err := cmd.Context.GetSnapshot(registryKey)
-	if err != nil || snap == nil || snap.NetAdds == nil {
-		return nil
+	if err != nil {
+		return nil, err
+	}
+
+	if snap == nil || snap.NetAdds == nil {
+		return nil, nil
 	}
 
 	names := make([]string, 0, len(snap.GetNetAdds()))
@@ -758,7 +765,7 @@ func listGroupNames(cmd *shared.Command, streamKey string) []string {
 
 	sort.Strings(names)
 
-	return names
+	return names, nil
 }
 
 // emitGroupRegistryInsert adds a group name to the registry.
@@ -842,25 +849,18 @@ func consumerPendingCount(pelSnap *pb.ReducedEffect, consumer string) int64 {
 
 // getStreamEntriesAdded reads the entries-added counter from the cfg key.
 // Returns -1 if not explicitly set (caller should fall back to element count).
-func getStreamEntriesAdded(cmd *shared.Command, streamKey string) int64 {
-	snap, _, err := cmd.Context.GetSnapshot(cfgKey(streamKey))
-	if err != nil || snap == nil || snap.NetAdds == nil {
-		return -1
-	}
-
-	if elem, ok := snap.GetNetAdds()["entries-added"]; ok {
-		raw := elem.GetData().Decompress()
-		if len(raw) == 8 {
-			return int64(binary.LittleEndian.Uint64(raw))
-		}
-	}
-
-	return -1
+func getStreamEntriesAdded(cmd *shared.Command, streamKey string) (int64, error) {
+	return getConfigCounter(cmd, streamKey, "entries-added", -1)
 }
 
 // incrementStreamEntriesAdded increments the stream's entries-added counter.
 func incrementStreamEntriesAdded(cmd *shared.Command, streamKey string) error {
-	current := max(getStreamEntriesAdded(cmd, streamKey), 0)
+	current, err := getStreamEntriesAdded(cmd, streamKey)
+	if err != nil {
+		return err
+	}
+
+	current = max(current, 0)
 
 	return emitCfgSet(cmd, streamKey, "entries-added", current+1)
 }
@@ -871,26 +871,21 @@ func setStreamEntriesAdded(cmd *shared.Command, streamKey string, value int64) e
 }
 
 // getIdmpGeneration reads the current IDMP generation from the cfg key.
-func getIdmpGeneration(cmd *shared.Command, streamKey string) int64 {
-	snap, _, err := cmd.Context.GetSnapshot(cfgKey(streamKey))
-	if err != nil || snap == nil || snap.NetAdds == nil {
-		return 0
-	}
-
-	if elem, ok := snap.GetNetAdds()["idmp-generation"]; ok {
-		raw := elem.GetData().Decompress()
-		if len(raw) == 8 {
-			return int64(binary.LittleEndian.Uint64(raw))
-		}
-	}
-
-	return 0
+func getIdmpGeneration(cmd *shared.Command, streamKey string) (int64, error) {
+	return getConfigCounter(cmd, streamKey, "idmp-generation", 0)
 }
 
 // emitProducerSeq records a producer's sequence number → stream entry ID mapping.
 func emitProducerSeq(cmd *shared.Command, streamKey, producer, seq string, entryID shared.StreamID) error {
-	gen := getIdmpGeneration(cmd, streamKey)
-	_, maxsize, _ := getStreamConfig(cmd, streamKey)
+	gen, err := getIdmpGeneration(cmd, streamKey)
+	if err != nil {
+		return err
+	}
+
+	_, maxsize, _, err := getStreamConfig(cmd, streamKey)
+	if err != nil {
+		return err
+	}
 
 	return emitProducerSeqWithConfig(cmd, streamKey, producer, seq, entryID, gen, maxsize)
 }
@@ -922,7 +917,11 @@ func emitProducerSeqWithConfig(cmd *shared.Command, streamKey, producer, seq str
 	// Enforce IDMP-MAXSIZE: evict oldest current-generation entries if over limit
 	if maxsize > 0 {
 		snap, _, err := cmd.Context.GetSnapshot(pKey)
-		if err == nil && snap != nil && snap.NetAdds != nil {
+		if err != nil {
+			return err
+		}
+
+		if snap != nil && snap.NetAdds != nil {
 			// Collect only current-generation entries
 			type entry struct {
 				seq     string
@@ -969,7 +968,7 @@ func emitProducerSeqWithConfig(cmd *shared.Command, streamKey, producer, seq str
 							Id:         []byte(entries[i].seq),
 						}},
 					}); err != nil {
-						slog.Error("stream MAXLEN: REMOVE_OP emit failed", "key", pKey, "error", err)
+						return err
 					}
 				}
 			}
@@ -996,12 +995,16 @@ func emitProducerRegistryInsert(cmd *shared.Command, streamKey, producer string)
 }
 
 // listProducerNames returns all registered producer names for a stream.
-func listProducerNames(cmd *shared.Command, streamKey string) []string {
+func listProducerNames(cmd *shared.Command, streamKey string) ([]string, error) {
 	registryKey := streamKey + "\x01p\x01__registry__"
 
 	snap, _, err := cmd.Context.GetSnapshot(registryKey)
-	if err != nil || snap == nil || snap.NetAdds == nil {
-		return nil
+	if err != nil {
+		return nil, err
+	}
+
+	if snap == nil || snap.NetAdds == nil {
+		return nil, nil
 	}
 
 	names := make([]string, 0, len(snap.GetNetAdds()))
@@ -1009,15 +1012,22 @@ func listProducerNames(cmd *shared.Command, streamKey string) []string {
 		names = append(names, name)
 	}
 
-	return names
+	return names, nil
 }
 
 // lookupProducerSeq checks if a sequence number already exists for a producer.
 // Respects IDMP-DURATION config: entries older than the duration are treated as expired.
-func lookupProducerSeq(cmd *shared.Command, streamKey, producer, seq string) (shared.StreamID, bool) {
-	gen := getIdmpGeneration(cmd, streamKey)
+func lookupProducerSeq(cmd *shared.Command, streamKey, producer, seq string) (shared.StreamID, bool, error) {
+	gen, err := getIdmpGeneration(cmd, streamKey)
+	if err != nil {
+		return shared.StreamID{}, false, err
+	}
 
-	duration, _, durationExplicit := getStreamConfig(cmd, streamKey)
+	duration, _, durationExplicit, err := getStreamConfig(cmd, streamKey)
+	if err != nil {
+		return shared.StreamID{}, false, err
+	}
+
 	if !durationExplicit {
 		duration = 0
 	}
@@ -1025,21 +1035,25 @@ func lookupProducerSeq(cmd *shared.Command, streamKey, producer, seq string) (sh
 	return lookupProducerSeqWithConfig(cmd, streamKey, producer, seq, gen, duration)
 }
 
-func lookupProducerSeqWithConfig(cmd *shared.Command, streamKey, producer, seq string, gen int64, duration int64) (shared.StreamID, bool) {
+func lookupProducerSeqWithConfig(cmd *shared.Command, streamKey, producer, seq string, gen int64, duration int64) (shared.StreamID, bool, error) {
 	snap, _, err := cmd.Context.GetSnapshot(producerKey(streamKey, producer))
-	if err != nil || snap == nil || snap.NetAdds == nil {
-		return shared.StreamID{}, false
+	if err != nil {
+		return shared.StreamID{}, false, err
+	}
+
+	if snap == nil || snap.NetAdds == nil {
+		return shared.StreamID{}, false, nil
 	}
 
 	entry, exists := snap.GetNetAdds()[seq]
 	if !exists {
-		return shared.StreamID{}, false
+		return shared.StreamID{}, false, nil
 	}
 
 	raw := entry.GetData().Decompress()
 	// Support both old 16-byte format and new 24-byte format
 	if len(raw) < 16 {
-		return shared.StreamID{}, false
+		return shared.StreamID{}, false, nil
 	}
 
 	id := decodeStreamElementID(raw[:16])
@@ -1048,7 +1062,7 @@ func lookupProducerSeqWithConfig(cmd *shared.Command, streamKey, producer, seq s
 	if len(raw) >= 32 {
 		entryGen := int64(binary.LittleEndian.Uint64(raw[24:32]))
 		if entryGen != gen {
-			return shared.StreamID{}, false // stale generation
+			return shared.StreamID{}, false, nil // stale generation
 		}
 	}
 
@@ -1056,11 +1070,11 @@ func lookupProducerSeqWithConfig(cmd *shared.Command, streamKey, producer, seq s
 	if len(raw) >= 24 {
 		storedAtMs := int64(binary.LittleEndian.Uint64(raw[16:24]))
 		if duration > 0 && timeNow().UnixMilli()-storedAtMs > duration*1000 {
-			return shared.StreamID{}, false // expired
+			return shared.StreamID{}, false, nil // expired
 		}
 	}
 
-	return id, true
+	return id, true, nil
 }
 
 // --- Stream IDMP config helpers ---
@@ -1085,7 +1099,7 @@ func emitCfgSet(cmd *shared.Command, streamKey, field string, value int64) error
 // getStreamConfig retrieves IDMP config (duration in seconds, maxsize) for a stream.
 // Defaults: duration=100, maxsize=100.
 // durationExplicit is true only if duration was explicitly set via XCFGSET.
-func getStreamConfig(cmd *shared.Command, streamKey string) (duration int64, maxsize int64, durationExplicit bool) {
+func getStreamConfig(cmd *shared.Command, streamKey string) (duration int64, maxsize int64, durationExplicit bool, err error) {
 	duration = 100
 	maxsize = 100
 
@@ -1112,50 +1126,49 @@ func getStreamConfig(cmd *shared.Command, streamKey string) (duration int64, max
 	return
 }
 
-// getIidsAdded retrieves the lifetime iids-added counter for a stream.
-func getIidsAdded(cmd *shared.Command, streamKey string) int64 {
+// getConfigCounter reads a stored counter, using fallback only when it is absent.
+func getConfigCounter(cmd *shared.Command, streamKey, field string, fallback int64) (int64, error) {
 	snap, _, err := cmd.Context.GetSnapshot(cfgKey(streamKey))
-	if err != nil || snap == nil || snap.NetAdds == nil {
-		return 0
+	if err != nil {
+		return 0, err
 	}
 
-	if elem, ok := snap.GetNetAdds()["iids-added"]; ok {
+	if elem, ok := snap.GetNetAdds()[field]; ok {
 		raw := elem.GetData().Decompress()
 		if len(raw) == 8 {
-			return int64(binary.LittleEndian.Uint64(raw))
+			return int64(binary.LittleEndian.Uint64(raw)), nil
 		}
 	}
 
-	return 0
+	return fallback, nil
+}
+
+// getIidsAdded retrieves the lifetime iids-added counter for a stream.
+func getIidsAdded(cmd *shared.Command, streamKey string) (int64, error) {
+	return getConfigCounter(cmd, streamKey, "iids-added", 0)
 }
 
 // incrementIidsAdded increments the lifetime iids-added counter.
 func incrementIidsAdded(cmd *shared.Command, streamKey string) error {
-	current := getIidsAdded(cmd, streamKey)
+	current, err := getIidsAdded(cmd, streamKey)
+	if err != nil {
+		return err
+	}
 
 	return emitCfgSet(cmd, streamKey, "iids-added", current+1)
 }
 
 // getIidsDuplicates retrieves the lifetime iids-duplicates counter.
-func getIidsDuplicates(cmd *shared.Command, streamKey string) int64 {
-	snap, _, err := cmd.Context.GetSnapshot(cfgKey(streamKey))
-	if err != nil || snap == nil || snap.NetAdds == nil {
-		return 0
-	}
-
-	if elem, ok := snap.GetNetAdds()["iids-duplicates"]; ok {
-		raw := elem.GetData().Decompress()
-		if len(raw) == 8 {
-			return int64(binary.LittleEndian.Uint64(raw))
-		}
-	}
-
-	return 0
+func getIidsDuplicates(cmd *shared.Command, streamKey string) (int64, error) {
+	return getConfigCounter(cmd, streamKey, "iids-duplicates", 0)
 }
 
 // incrementIidsDuplicates increments the lifetime iids-duplicates counter.
 func incrementIidsDuplicates(cmd *shared.Command, streamKey string) error {
-	current := getIidsDuplicates(cmd, streamKey)
+	current, err := getIidsDuplicates(cmd, streamKey)
+	if err != nil {
+		return err
+	}
 
 	return emitCfgSet(cmd, streamKey, "iids-duplicates", current+1)
 }
@@ -1163,7 +1176,10 @@ func incrementIidsDuplicates(cmd *shared.Command, streamKey string) error {
 // clearAllProducerKeys invalidates all IDMP history by incrementing the generation counter.
 // Old entries remain in producer keys but are ignored during lookup (generation mismatch).
 func clearAllProducerKeys(cmd *shared.Command, streamKey string) error {
-	gen := getIdmpGeneration(cmd, streamKey)
+	gen, err := getIdmpGeneration(cmd, streamKey)
+	if err != nil {
+		return err
+	}
 
 	return emitCfgSet(cmd, streamKey, "idmp-generation", gen+1)
 }

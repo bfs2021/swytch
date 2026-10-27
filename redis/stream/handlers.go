@@ -347,11 +347,22 @@ parseID:
 		)
 
 		if hasIDMP {
-			idmpGen = getIdmpGeneration(cmd, key)
+			idmpGen, err = getIdmpGeneration(cmd, key)
+			if err != nil {
+				w.WriteError(err.Error())
+
+				return
+			}
 
 			var durationExplicit bool
 
-			idmpDuration, idmpMaxsize, durationExplicit = getStreamConfig(cmd, key)
+			idmpDuration, idmpMaxsize, durationExplicit, err = getStreamConfig(cmd, key)
+			if err != nil {
+				w.WriteError(err.Error())
+
+				return
+			}
+
 			if !durationExplicit {
 				idmpDuration = 0 // don't expire with default duration
 			}
@@ -360,7 +371,14 @@ parseID:
 		// Producer dedup check: if this iid was already recorded, return the existing ID.
 		// Only check if the stream exists — if it was DELeted, stale mappings must be ignored.
 		if hasIDMP && idmpIID != "" && exists {
-			if existingID, found := lookupProducerSeqWithConfig(cmd, key, idmpProducer, idmpIID, idmpGen, idmpDuration); found {
+			existingID, found, err := lookupProducerSeqWithConfig(cmd, key, idmpProducer, idmpIID, idmpGen, idmpDuration)
+			if err != nil {
+				w.WriteError(err.Error())
+
+				return
+			}
+
+			if found {
 				if err := incrementIidsDuplicates(cmd, key); err != nil {
 					w.WriteError(err.Error())
 
@@ -527,7 +545,11 @@ func trimEntries(cmd *shared.Command, key string, entries []*shared.StreamEntry,
 			return true, nil
 		}
 		// Check all groups
-		groupNames := listGroupNames(cmd, key)
+		groupNames, err := listGroupNames(cmd, key)
+		if err != nil {
+			return false, err
+		}
+
 		for _, gName := range groupNames {
 			gSnap, _, err := getGroupSnapshot(cmd, key, gName)
 			if err != nil {
@@ -561,7 +583,11 @@ func trimEntries(cmd *shared.Command, key string, entries []*shared.StreamEntry,
 			return nil
 		}
 
-		groupNames := listGroupNames(cmd, key)
+		groupNames, err := listGroupNames(cmd, key)
+		if err != nil {
+			return err
+		}
+
 		for _, gName := range groupNames {
 			pelSnap, _, err := getPELSnapshot(cmd, key, gName)
 			if err != nil {
@@ -1540,6 +1566,8 @@ func handleXInfo(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 
 // handleXInfoStream handles XINFO STREAM key [FULL [COUNT count]]
 func handleXInfoStream(cmd *shared.Command, w *shared.Writer) {
+	defer w.DiscardPartialReply(w.Buffer().Len(), w.ErrorCount())
+
 	if len(cmd.Args) < 2 {
 		w.WriteError("ERR wrong number of arguments for 'xinfo|stream' command")
 
@@ -1601,7 +1629,14 @@ func handleXInfoStream(cmd *shared.Command, w *shared.Writer) {
 	lastID, entriesAdded, maxDeletedID, _ := streamMetadata(snap)
 
 	// Override entries-added from cfg key if available
-	if cfgEA := getStreamEntriesAdded(cmd, key); cfgEA >= 0 {
+	cfgEA, err := getStreamEntriesAdded(cmd, key)
+	if err != nil {
+		w.WriteError(err.Error())
+
+		return
+	}
+
+	if cfgEA >= 0 {
 		entriesAdded = cfgEA
 	}
 
@@ -1612,18 +1647,42 @@ func handleXInfoStream(cmd *shared.Command, w *shared.Writer) {
 	firstID := streamFirstID(entries)
 
 	// Get group count
-	groupNames := listGroupNames(cmd, key)
+	groupNames, err := listGroupNames(cmd, key)
+	if err != nil {
+		w.WriteError(err.Error())
+
+		return
+	}
+
 	groupCount := len(groupNames)
 
 	// Get producer count and total IID count (filtered by current generation)
-	producerNames := listProducerNames(cmd, key)
-	currentGen := getIdmpGeneration(cmd, key)
+	producerNames, err := listProducerNames(cmd, key)
+	if err != nil {
+		w.WriteError(err.Error())
+
+		return
+	}
+
+	currentGen, err := getIdmpGeneration(cmd, key)
+	if err != nil {
+		w.WriteError(err.Error())
+
+		return
+	}
+
 	producerCount := 0
 	iidsTracked := 0
 
 	for _, pName := range producerNames {
 		snap, _, err := cmd.Context.GetSnapshot(producerKey(key, pName))
-		if err == nil && snap != nil && snap.NetAdds != nil {
+		if err != nil {
+			w.WriteError(err.Error())
+
+			return
+		}
+
+		if snap != nil && snap.NetAdds != nil {
 			count := 0
 
 			for _, elem := range snap.GetNetAdds() {
@@ -1650,9 +1709,26 @@ func handleXInfoStream(cmd *shared.Command, w *shared.Writer) {
 	}
 
 	// Get IDMP config and lifetime counters
-	idmpDuration, idmpMaxsize, _ := getStreamConfig(cmd, key)
-	iidsAdded := getIidsAdded(cmd, key)
-	iidsDuplicates := getIidsDuplicates(cmd, key)
+	idmpDuration, idmpMaxsize, _, err := getStreamConfig(cmd, key)
+	if err != nil {
+		w.WriteError(err.Error())
+
+		return
+	}
+
+	iidsAdded, err := getIidsAdded(cmd, key)
+	if err != nil {
+		w.WriteError(err.Error())
+
+		return
+	}
+
+	iidsDuplicates, err := getIidsDuplicates(cmd, key)
+	if err != nil {
+		w.WriteError(err.Error())
+
+		return
+	}
 
 	if full {
 		writeXInfoStreamFull(w, entries, lastID, entriesAdded, maxDeletedID, firstID, producerCount, iidsTracked, iidsAdded, iidsDuplicates, idmpDuration, idmpMaxsize, count, cmd, key, groupNames)
@@ -1782,15 +1858,32 @@ func writeXInfoStreamFull(w *shared.Writer, entries []*shared.StreamEntry, lastI
 	w.WriteArray(len(groupNames))
 
 	for _, name := range groupNames {
+		errorsBefore := w.ErrorCount()
 		writeXInfoGroupFull(w, cmd, key, name, entriesAdded, int64(len(entries)), count)
+
+		if w.ErrorCount() != errorsBefore {
+			return
+		}
 	}
 }
 
 func writeXInfoGroupFull(w *shared.Writer, cmd *shared.Command, key, groupName string, entriesAdded int64, streamLength int64, count int64) {
-	gSnap, _, _ := getGroupSnapshot(cmd, key, groupName)
+	gSnap, _, err := getGroupSnapshot(cmd, key, groupName)
+	if err != nil {
+		w.WriteError(err.Error())
+
+		return
+	}
+
 	lastDelivered, entriesRead, _ := getGroupMeta(gSnap)
 
-	pelSnap, _, _ := getPELSnapshot(cmd, key, groupName)
+	pelSnap, _, err := getPELSnapshot(cmd, key, groupName)
+	if err != nil {
+		w.WriteError(err.Error())
+
+		return
+	}
+
 	consumers := getConsumersFromGroup(gSnap)
 
 	w.WriteArray(14)
@@ -1922,6 +2015,8 @@ func writeStreamEntry(w *shared.Writer, entry *shared.StreamEntry) {
 
 // handleXInfoGroups handles XINFO GROUPS key
 func handleXInfoGroups(cmd *shared.Command, w *shared.Writer) {
+	defer w.DiscardPartialReply(w.Buffer().Len(), w.ErrorCount())
+
 	if len(cmd.Args) < 2 {
 		w.WriteError("ERR wrong number of arguments for 'xinfo|groups' command")
 
@@ -1952,11 +2047,25 @@ func handleXInfoGroups(cmd *shared.Command, w *shared.Writer) {
 	entries := snapshotToEntries(snap)
 
 	_, entriesAdded, _, _ := streamMetadata(snap)
-	if cfgEA := getStreamEntriesAdded(cmd, key); cfgEA >= 0 {
+
+	cfgEA, err := getStreamEntriesAdded(cmd, key)
+	if err != nil {
+		w.WriteError(err.Error())
+
+		return
+	}
+
+	if cfgEA >= 0 {
 		entriesAdded = cfgEA
 	}
 
-	groupNames := listGroupNames(cmd, key)
+	groupNames, err := listGroupNames(cmd, key)
+	if err != nil {
+		w.WriteError(err.Error())
+
+		return
+	}
+
 	if len(groupNames) == 0 {
 		w.WriteArray(0)
 
@@ -1966,9 +2075,22 @@ func handleXInfoGroups(cmd *shared.Command, w *shared.Writer) {
 	w.WriteArray(len(groupNames))
 
 	for _, name := range groupNames {
-		gSnap, _, _ := getGroupSnapshot(cmd, key, name)
+		gSnap, _, err := getGroupSnapshot(cmd, key, name)
+		if err != nil {
+			w.WriteError(err.Error())
+
+			return
+		}
+
 		lastDelivered, entriesRead, _ := getGroupMeta(gSnap)
-		pelSnap, _, _ := getPELSnapshot(cmd, key, name)
+
+		pelSnap, _, err := getPELSnapshot(cmd, key, name)
+		if err != nil {
+			w.WriteError(err.Error())
+
+			return
+		}
+
 		consumers := getConsumersFromGroup(gSnap)
 
 		pelCount := 0
@@ -2041,15 +2163,34 @@ func handleXInfoConsumers(cmd *shared.Command, w *shared.Writer) {
 		return
 	}
 
-	if !groupExists(cmd, key, groupName) {
+	hasGroup, err := groupExists(cmd, key, groupName)
+	if err != nil {
+		w.WriteError(err.Error())
+
+		return
+	}
+
+	if !hasGroup {
 		w.WriteError("NOGROUP No such consumer group '" + groupName + "' for key name '" + key + "'")
 
 		return
 	}
 
-	gSnap, _, _ := getGroupSnapshot(cmd, key, groupName)
+	gSnap, _, err := getGroupSnapshot(cmd, key, groupName)
+	if err != nil {
+		w.WriteError(err.Error())
+
+		return
+	}
+
 	consumers := getConsumersFromGroup(gSnap)
-	pelSnap, _, _ := getPELSnapshot(cmd, key, groupName)
+
+	pelSnap, _, err := getPELSnapshot(cmd, key, groupName)
+	if err != nil {
+		w.WriteError(err.Error())
+
+		return
+	}
 
 	if len(consumers) == 0 {
 		w.WriteArray(0)
@@ -2341,7 +2482,13 @@ func handleXTrim(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 
 			// For DELREF: emit PEL removes for trimmed entries
 			if trimOpts.RefMode == shared.RefModeDelRef {
-				groupNames := listGroupNames(cmd, key)
+				groupNames, err := listGroupNames(cmd, key)
+				if err != nil {
+					w.WriteError(err.Error())
+
+					return
+				}
+
 				for _, gName := range groupNames {
 					pelSnap, _, err := getPELSnapshot(cmd, key, gName)
 					if err != nil {
@@ -2385,7 +2532,11 @@ func handleXTrim(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 // entriesToStreamValue converts snapshot entries to a StreamValue for trim logic reuse.
 // populateStreamGroups loads consumer group data from the effects system into a StreamValue.
 func populateStreamGroups(cmd *shared.Command, key string, sv *shared.StreamValue) error {
-	groupNames := listGroupNames(cmd, key)
+	groupNames, err := listGroupNames(cmd, key)
+	if err != nil {
+		return err
+	}
+
 	for _, gName := range groupNames {
 		gSnap, _, err := getGroupSnapshot(cmd, key, gName)
 		if err != nil {
@@ -2597,7 +2748,13 @@ func handleXDelEx(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 			if refMode == shared.RefModeAcked {
 				canDelete := true
 
-				groupNames := listGroupNames(cmd, key)
+				groupNames, err := listGroupNames(cmd, key)
+				if err != nil {
+					w.WriteError(err.Error())
+
+					return
+				}
+
 				for _, gName := range groupNames {
 					gSnap, _, err := getGroupSnapshot(cmd, key, gName)
 					if err != nil {
@@ -2646,7 +2803,13 @@ func handleXDelEx(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 
 			// DELREF mode - remove from PELs
 			if refMode == shared.RefModeDelRef {
-				groupNames := listGroupNames(cmd, key)
+				groupNames, err := listGroupNames(cmd, key)
+				if err != nil {
+					w.WriteError(err.Error())
+
+					return
+				}
+
 				for _, gName := range groupNames {
 					pelSnap, _, err := getPELSnapshot(cmd, key, gName)
 					if err != nil {
@@ -2964,7 +3127,14 @@ func handleXIdmpRecord(cmd *shared.Command, w *shared.Writer, db *shared.Databas
 		}
 
 		// Check if already recorded with same iid
-		if existingID, exists := lookupProducerSeq(cmd, key, producer, iid); exists {
+		existingID, recorded, err := lookupProducerSeq(cmd, key, producer, iid)
+		if err != nil {
+			w.WriteError(err.Error())
+
+			return
+		}
+
+		if recorded {
 			if existingID.Compare(id) != 0 {
 				w.WriteError("ERR IID already exists for this producer with a different stream ID")
 
@@ -3088,7 +3258,12 @@ func handleXCfgSet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 		}
 
 		// Check if any value actually changed — if so, clear IDMP history
-		oldDuration, oldMaxsize, _ := getStreamConfig(cmd, key)
+		oldDuration, oldMaxsize, _, err := getStreamConfig(cmd, key)
+		if err != nil {
+			w.WriteError(err.Error())
+
+			return
+		}
 
 		changed := false
 		if v, ok := cfgValues["idmp-duration"]; ok && v != oldDuration {

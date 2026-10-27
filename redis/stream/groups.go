@@ -173,7 +173,14 @@ func handleXGroupCreate(cmd *shared.Command, w *shared.Writer) (valid bool, keys
 		}
 
 		// Check if group already exists
-		if groupExists(cmd, key, groupName) {
+		hasGroup, err := groupExists(cmd, key, groupName)
+		if err != nil {
+			w.WriteError(err.Error())
+
+			return
+		}
+
+		if hasGroup {
 			w.WriteError("BUSYGROUP Consumer Group name already exists")
 
 			return
@@ -215,7 +222,15 @@ func handleXGroupCreate(cmd *shared.Command, w *shared.Writer) (valid bool, keys
 		// Cap entries-read
 		if entriesRead >= 0 && exists {
 			_, ea, _, _ := streamMetadata(snap)
-			if cfgEA := getStreamEntriesAdded(cmd, key); cfgEA >= 0 {
+
+			cfgEA, err := getStreamEntriesAdded(cmd, key)
+			if err != nil {
+				w.WriteError(err.Error())
+
+				return
+			}
+
+			if cfgEA >= 0 {
 				ea = cfgEA
 			}
 
@@ -279,7 +294,14 @@ func handleXGroupDestroy(cmd *shared.Command, w *shared.Writer) (valid bool, key
 			return
 		}
 
-		if !groupExists(cmd, key, groupName) {
+		hasGroup, err := groupExists(cmd, key, groupName)
+		if err != nil {
+			w.WriteError(err.Error())
+
+			return
+		}
+
+		if !hasGroup {
 			w.WriteInteger(0)
 
 			return
@@ -345,14 +367,26 @@ func handleXGroupCreateConsumer(cmd *shared.Command, w *shared.Writer) (valid bo
 			return
 		}
 
-		if !groupExists(cmd, key, groupName) {
+		hasGroup, err := groupExists(cmd, key, groupName)
+		if err != nil {
+			w.WriteError(err.Error())
+
+			return
+		}
+
+		if !hasGroup {
 			w.WriteError("NOGROUP No such consumer group '" + groupName + "' for key name '" + key + "'")
 
 			return
 		}
 
 		// Check if consumer already exists
-		gSnap, _, _ := getGroupSnapshot(cmd, key, groupName)
+		gSnap, _, err := getGroupSnapshot(cmd, key, groupName)
+		if err != nil {
+			w.WriteError(err.Error())
+
+			return
+		}
 
 		consumers := getConsumersFromGroup(gSnap)
 		if _, ok := consumers[consumerName]; ok {
@@ -419,7 +453,14 @@ func handleXGroupDelConsumer(cmd *shared.Command, w *shared.Writer) (valid bool,
 			return
 		}
 
-		if !groupExists(cmd, key, groupName) {
+		hasGroup, err := groupExists(cmd, key, groupName)
+		if err != nil {
+			w.WriteError(err.Error())
+
+			return
+		}
+
+		if !hasGroup {
 			w.WriteError("NOGROUP No such consumer group '" + groupName + "' for key name '" + key + "'")
 
 			return
@@ -531,7 +572,14 @@ func handleXGroupSetID(cmd *shared.Command, w *shared.Writer) (valid bool, keys 
 			return
 		}
 
-		if !groupExists(cmd, key, groupName) {
+		hasGroup, err := groupExists(cmd, key, groupName)
+		if err != nil {
+			w.WriteError(err.Error())
+
+			return
+		}
+
+		if !hasGroup {
 			w.WriteError("NOGROUP No such consumer group '" + groupName + "' for key name '" + key + "'")
 
 			return
@@ -568,14 +616,28 @@ func handleXGroupSetID(cmd *shared.Command, w *shared.Writer) (valid bool, keys 
 		}
 
 		// Get existing group metadata for createdAt
-		gSnap, _, _ := getGroupSnapshot(cmd, key, groupName)
+		gSnap, _, err := getGroupSnapshot(cmd, key, groupName)
+		if err != nil {
+			w.WriteError(err.Error())
+
+			return
+		}
+
 		_, existingEntriesRead, existingCreatedAt := getGroupMeta(gSnap)
 
 		finalEntriesRead := existingEntriesRead
 
 		if entriesRead >= 0 {
 			_, ea, _, _ := streamMetadata(snap)
-			if cfgEA := getStreamEntriesAdded(cmd, key); cfgEA >= 0 {
+
+			cfgEA, err := getStreamEntriesAdded(cmd, key)
+			if err != nil {
+				w.WriteError(err.Error())
+
+				return
+			}
+
+			if cfgEA >= 0 {
 				ea = cfgEA
 			}
 
@@ -672,13 +734,25 @@ func handleXAck(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 			return
 		}
 
-		if !groupExists(cmd, key, groupName) {
+		hasGroup, err := groupExists(cmd, key, groupName)
+		if err != nil {
+			w.WriteError(err.Error())
+
+			return
+		}
+
+		if !hasGroup {
 			w.WriteError("NOGROUP No such consumer group '" + groupName + "' for key name '" + key + "'")
 
 			return
 		}
 
-		pelSnap, _, _ := getPELSnapshot(cmd, key, groupName)
+		pelSnap, _, err := getPELSnapshot(cmd, key, groupName)
+		if err != nil {
+			w.WriteError(err.Error())
+
+			return
+		}
 
 		acked := int64(0)
 
@@ -736,13 +810,26 @@ func handleXPending(cmd *shared.Command, w *shared.Writer, db *shared.Database) 
 			return
 		}
 
-		if !groupExists(cmd, key, groupName) {
+		hasGroup, err := groupExists(cmd, key, groupName)
+		if err != nil {
+			w.WriteError(err.Error())
+
+			return
+		}
+
+		if !hasGroup {
 			w.WriteError("NOGROUP No such consumer group '" + groupName + "' for key name '" + key + "'")
 
 			return
 		}
 
-		pelSnap, _, _ := getPELSnapshot(cmd, key, groupName)
+		pelSnap, _, err := getPELSnapshot(cmd, key, groupName)
+		if err != nil {
+			w.WriteError(err.Error())
+
+			return
+		}
+
 		pelEntries := pelToEntries(pelSnap)
 
 		// Summary form: XPENDING key group
@@ -1159,7 +1246,13 @@ parseRGStreams:
 			earliest := int64(-1)
 
 			for _, sKey := range streamKeys {
-				pelSnap, _, _ := getPELSnapshot(cmd, sKey, groupName)
+				pelSnap, _, err := getPELSnapshot(cmd, sKey, groupName)
+				if err != nil {
+					w.WriteError(err.Error())
+
+					return
+				}
+
 				for _, pe := range pelToEntries(pelSnap) {
 					claimableAt := pe.DeliveryTime + claimMinIdle
 					if earliest < 0 || claimableAt < earliest {
@@ -1870,7 +1963,14 @@ func handleXAckDel(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 			return
 		}
 
-		if !groupExists(cmd, key, groupName) {
+		hasGroup, err := groupExists(cmd, key, groupName)
+		if err != nil {
+			w.WriteError(err.Error())
+
+			return
+		}
+
+		if !hasGroup {
 			w.WriteArray(numIds)
 
 			for range numIds {
@@ -1924,7 +2024,14 @@ func handleXAckDel(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 
 			case shared.RefModeDelRef:
 				// Ack + delete from ALL groups' PELs + delete stream entry
-				for _, g := range listGroupNames(cmd, key) {
+				groupNames, err := listGroupNames(cmd, key)
+				if err != nil {
+					w.WriteError(err.Error())
+
+					return
+				}
+
+				for _, g := range groupNames {
 					if g == groupName {
 						continue
 					}
@@ -1948,7 +2055,14 @@ func handleXAckDel(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 				// Ack; only delete stream entry if no other group still has it pending
 				allAcked := true
 
-				for _, g := range listGroupNames(cmd, key) {
+				groupNames, err := listGroupNames(cmd, key)
+				if err != nil {
+					w.WriteError(err.Error())
+
+					return
+				}
+
+				for _, g := range groupNames {
 					if g == groupName {
 						continue
 					}
@@ -2134,7 +2248,14 @@ func handleXClaim(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 			return
 		}
 
-		if !groupExists(cmd, key, groupName) {
+		hasGroup, err := groupExists(cmd, key, groupName)
+		if err != nil {
+			w.WriteError(err.Error())
+
+			return
+		}
+
+		if !hasGroup {
 			w.WriteError("NOGROUP No such consumer group '" + groupName + "' for key name '" + key + "'")
 
 			return
@@ -2348,7 +2469,14 @@ func handleXAutoClaim(cmd *shared.Command, w *shared.Writer, db *shared.Database
 			return
 		}
 
-		if !groupExists(cmd, key, groupName) {
+		hasGroup, err := groupExists(cmd, key, groupName)
+		if err != nil {
+			w.WriteError(err.Error())
+
+			return
+		}
+
+		if !hasGroup {
 			w.WriteError("NOGROUP No such consumer group '" + groupName + "' for key name '" + key + "'")
 
 			return
