@@ -1394,7 +1394,9 @@ func (h *Handler) HandleForwardedTransaction(tx *pb.ForwardedTransaction) *pb.Fo
 				if errors.Is(err, effects.ErrTxnAborted) {
 					w.WriteNullArray()
 				} else {
-					return &pb.ForwardedResponse{Error: true, ErrorMessage: "TRYAGAIN " + err.Error()}
+					// Preserve the Redis error code. Transport-level ErrorMessage
+					// is prefixed with ERR by the forwarding engine.
+					w.WriteError("TRYAGAIN " + err.Error())
 				}
 			}
 		}

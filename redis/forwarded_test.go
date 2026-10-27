@@ -47,7 +47,7 @@ func TestForwardedTransactionFlushFailure(t *testing.T) {
 	))
 	h.engine.SetCloudReader(nil)
 
-	if !resp.GetError() || !strings.HasPrefix(resp.GetErrorMessage(), "TRYAGAIN ") || len(resp.GetRespData()) != 0 {
+	if resp.GetError() || !strings.HasPrefix(string(resp.GetRespData()), "-TRYAGAIN ") || strings.Count(string(resp.GetRespData()), "\r\n") != 1 {
 		t.Fatalf("flush failure must replace all provisional replies: %v", resp)
 	}
 
