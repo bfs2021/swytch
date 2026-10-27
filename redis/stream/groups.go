@@ -138,6 +138,40 @@ func handleXGroupCreate(cmd *shared.Command, w *shared.Writer) (valid bool, keys
 			return
 		}
 
+		// Validate the ID before MKSTREAM emits any state. Keep validation in
+		// the runner so MULTI reports this as an EXEC command error.
+		var lastDeliveredID shared.StreamID
+
+		switch idStr {
+		case "$":
+			if exists {
+				lastID, _, _, found := streamMetadata(snap)
+				if !found {
+					entries := snapshotToEntries(snap)
+					lastID = streamLastID(entries)
+				}
+
+				lastDeliveredID = lastID
+			}
+		case "0", zeroStreamID:
+			lastDeliveredID = shared.StreamID{}
+		default:
+			id, _, isSpecial, err := shared.ParseStreamID(idStr)
+			if err != nil {
+				w.WriteError("ERR Invalid stream ID specified as stream command argument")
+
+				return
+			}
+
+			if isSpecial {
+				w.WriteError("ERR Invalid stream ID specified as stream command argument")
+
+				return
+			}
+
+			lastDeliveredID = id
+		}
+
 		if !exists {
 			if !mkStream {
 				w.WriteError("ERR The XGROUP subcommand requires the key to exist. Note that for CREATE you may want to use the MKSTREAM option to create an empty stream automatically.")
@@ -184,39 +218,6 @@ func handleXGroupCreate(cmd *shared.Command, w *shared.Writer) (valid bool, keys
 			w.WriteError("BUSYGROUP Consumer Group name already exists")
 
 			return
-		}
-
-		// Parse last delivered ID
-		var lastDeliveredID shared.StreamID
-
-		switch idStr {
-		case "$":
-			if exists {
-				lastID, _, _, found := streamMetadata(snap)
-				if !found {
-					entries := snapshotToEntries(snap)
-					lastID = streamLastID(entries)
-				}
-
-				lastDeliveredID = lastID
-			}
-		case "0", zeroStreamID:
-			lastDeliveredID = shared.StreamID{}
-		default:
-			id, _, isSpecial, err := shared.ParseStreamID(idStr)
-			if err != nil {
-				w.WriteError("ERR Invalid stream ID specified as stream command argument")
-
-				return
-			}
-
-			if isSpecial {
-				w.WriteError("ERR Invalid stream ID specified as stream command argument")
-
-				return
-			}
-
-			lastDeliveredID = id
 		}
 
 		// Cap entries-read

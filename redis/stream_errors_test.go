@@ -7,6 +7,39 @@ import (
 	"github.com/swytchdb/swytch/redis/shared"
 )
 
+func TestXGroupInvalidIDTransaction(t *testing.T) {
+	for _, ssi := range []bool{false, true} {
+		h := newSSIHandler(t)
+		h.ssi = ssi
+		run := commandClient(h)
+		run("MULTI")
+		run("SET", "before", "value")
+
+		reply := run("XGROUP", "CREATE", "s", "g", "invalid-id", "MKSTREAM")
+
+		wantError := "-ERR Invalid stream ID specified as stream command argument\r\n"
+		if ssi {
+			if reply != wantError {
+				t.Fatal(reply)
+			}
+		} else if reply != "+QUEUED\r\n" {
+			t.Fatal(reply)
+		}
+
+		if got := run("EXEC"); got != "*2\r\n+OK\r\n"+wantError {
+			t.Fatalf("invalid ID should fail only its EXEC entry: %q", got)
+		}
+
+		if got := run("GET", "before"); got != "$5\r\nvalue\r\n" {
+			t.Fatal(got)
+		}
+
+		if got := run("EXISTS", "s"); got != ":0\r\n" {
+			t.Fatalf("invalid ID created a stream: %q", got)
+		}
+	}
+}
+
 func TestStreamReadFailureRollback(t *testing.T) {
 	for _, tc := range []struct {
 		name string

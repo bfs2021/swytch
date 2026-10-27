@@ -162,6 +162,39 @@ func TestStreamWriteFailureRollback(t *testing.T) {
 
 type failingCloudReader struct{}
 
+func TestXGroupCreateValidatesIDBeforeMKStream(t *testing.T) {
+	for _, id := range []string{"invalid-id", "*", "+", "-"} {
+		t.Run(id, func(t *testing.T) {
+			env := newTestEnv()
+			writes := 0
+
+			env.eng.SetOnLocalEffect(func(_ effects.Tip, eff *pb.Effect) {
+				if eff.GetData() != nil || eff.GetMeta() != nil {
+					writes++
+				}
+			})
+			runWithoutFlush(t, env, handleXGroup, "CREATE", "s", "g", id, "MKSTREAM")
+
+			if got := env.buf.String(); got != "-ERR Invalid stream ID specified as stream command argument\r\n" {
+				t.Fatal(got)
+			}
+
+			if writes != 0 {
+				t.Fatalf("invalid ID emitted %d data or metadata effects", writes)
+			}
+
+			if err := env.ctx.Flush(); err != nil {
+				t.Fatal(err)
+			}
+
+			_, _, exists, _, err := getStreamSnapshot(streamTestCommand(env), "s")
+			if err != nil || exists {
+				t.Fatalf("invalid ID created a stream: exists=%v err=%v", exists, err)
+			}
+		})
+	}
+}
+
 func (failingCloudReader) MayHold(string) bool { return true }
 func (failingCloudReader) MarkPending(string)  {}
 func (failingCloudReader) CloudTips(context.Context, string) ([]effects.Tip, []effects.CloudEffect, []effects.Tip, error) {
